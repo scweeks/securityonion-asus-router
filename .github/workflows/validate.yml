@@ -1,0 +1,37 @@
+name: Validate Pipelines
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Validate JSON syntax — all pipeline files
+        run: |
+          FAIL=0
+          for f in pipelines/asus pipelines/asus.firewall pipelines/asus.wireless \
+                   pipelines/asus.dhcp pipelines/asus.auth pipelines/asus.system; do
+            if python3 -m json.tool "$f" > /dev/null 2>&1; then
+              echo "✓  $f"
+            else
+              echo "✗  $f  — INVALID JSON"
+              python3 -m json.tool "$f" || true
+              FAIL=1
+            fi
+          done
+          exit $FAIL
+
+      - name: Run synthetic test suite
+        run: python3 tests/run_tests.py

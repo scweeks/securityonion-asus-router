@@ -1,0 +1,123 @@
+{
+  "description": "ASUS wireless/roaming datasets. Called from the asus entry pipeline for hostapd, wlceventd, acsd, roamast, bsd, and kernel-sourced wireless driver/firmware messages (SBF:/WLC_SCB_*/CFG80211-ERROR/UDB/mesh-client, recognized by content since they carry no userspace daemon tag). Sets dataset 'wireless' by default; the roamast and bsd branches override it to 'roaming'.",
+  "processors": [
+    { "set": { "field": "event.dataset", "value": "wireless" } },
+    { "set": { "field": "category", "value": "network" } },
+    { "set": { "field": "event.provider", "value": "{{{process.name}}}" } },
+
+    { "grok": {
+        "description": "wlceventd association/auth events",
+        "if": "ctx.process?.name == 'wlceventd'",
+        "field": "_tmp.body",
+        "patterns": [
+          "^wlceventd_proc_event\\(%{INT:asus.wireless.event_id:int}\\):\\s+%{NOTSPACE:asus.wireless.interface}:\\s+%{WORD:_tmp.wireless_action}\\s+%{COMMONMAC:source.mac},\\s+status:\\s+%{DATA:asus.wireless.status}(?:,\\s+reason:\\s+%{DATA:asus.wireless.reason})?(?:,\\s+rssi:%{NUMBER:asus.wireless.rssi:int})?\\s*$",
+          "^wlceventd_proc_event\\(%{INT:asus.wireless.event_id:int}\\):\\s+%{NOTSPACE:asus.wireless.interface}:\\s+%{DATA:_tmp.wireless_action}\\s+%{COMMONMAC:source.mac},\\s+status:\\s+%{DATA:asus.wireless.status}(?:,\\s+reason:\\s+%{DATA:asus.wireless.reason})?(?:,\\s+rssi:%{NUMBER:asus.wireless.rssi:int})?\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "script": {
+        "description": "Classify wlceventd action (deauth_ind/disassoc_ind -> end/failure; auth/assoc/reassoc -> start/success-if-status-ok)",
+        "if": "ctx.process?.name == 'wlceventd'",
+        "lang": "painless",
+        "source": "String raw = ctx._tmp?.wireless_action != null ? ctx._tmp.wireless_action.toString() : null; if (raw != null) { String normalized = raw.toLowerCase().replace(' ', '_'); ctx.event.put('action', 'wireless-' + normalized); if (normalized.startsWith('deauth') || normalized.startsWith('disassoc')) { ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (normalized == 'auth' || normalized.startsWith('assoc') || normalized.startsWith('reassoc')) { ctx.event.put('type', ['connection', 'start']); if (ctx.asus?.wireless?.status != null) { String st = ctx.asus.wireless.status.toString().toLowerCase(); if (st.contains('successful') || st == '0' || st.contains('(0)')) { ctx.event.put('outcome', 'success'); } } } } if (ctx.source?.mac != null) { ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } },
+
+    { "grok": {
+        "description": "hostapd: try the channel-switch shape first (most specific), then STA-with-security-protocol, then plain STA, then a bare fallback so nothing is lost.",
+        "if": "ctx.process?.name == 'hostapd'",
+        "field": "_tmp.body",
+        "patterns": [
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+IEEE\\s+%{DATA:asus.wireless.protocol}\\s+driver had channel switch:\\s+%{GREEDYDATA:asus.wireless.info}\\s*$",
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+STA\\s+%{COMMONMAC:source.mac}\\s+%{WORD:asus.wireless.security_protocol}:\\s+%{GREEDYDATA:asus.wireless.info}\\s*$",
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+STA\\s+%{COMMONMAC:source.mac}\\s+%{GREEDYDATA:asus.wireless.info}\\s*$",
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+%{GREEDYDATA:asus.wireless.info}\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "script": {
+        "description": "Classify hostapd info text: associated/disassociated/deauthenticated/WPA handshake/RADIUS accounting/channel-switch.",
+        "if": "ctx.process?.name == 'hostapd'",
+        "lang": "painless",
+        "source": "String info = ctx.asus?.wireless?.info != null ? ctx.asus.wireless.info.toString() : ''; String lower = info.toLowerCase(); if (ctx.asus?.wireless?.protocol != null) { ctx.event.put('action', 'wireless-channel-switch'); ctx.event.put('type', ['change', 'info']); ctx.event.put('outcome', 'success'); } else if (lower.contains('associated') && !lower.contains('disassociated') && !lower.contains('deauthenticated')) { ctx.event.put('action', 'wireless-associated'); ctx.event.put('type', ['connection', 'start']); ctx.event.put('outcome', 'success'); } else if (lower.contains('disassociated')) { ctx.event.put('action', 'wireless-disassociated'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (lower.contains('deauthenticated')) { ctx.event.put('action', 'wireless-deauthenticated'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (lower.contains('pairwise key handshake completed')) { ctx.event.put('action', 'wireless-wpa-pairwise-key-handshake-completed'); ctx.event.put('type', ['connection', 'info']); ctx.event.put('outcome', 'success'); } else if (lower.contains('group key handshake completed')) { ctx.event.put('action', 'wireless-wpa-group-key-handshake-completed'); ctx.event.put('type', ['connection', 'info']); ctx.event.put('outcome', 'success'); } else if (lower.contains('starting accounting session')) { ctx.event.put('action', 'wireless-radius-accounting-start'); ctx.event.put('type', ['connection', 'info']); ctx.event.put('outcome', 'success'); } else { ctx.event.put('action', 'wireless-hostapd'); ctx.event.put('type', ['info']); } if (ctx.source?.mac != null) { ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } },
+
+    { "grok": {
+        "description": "acsd channel-selection messages -- free-form text, passed through as-is.",
+        "if": "ctx.process?.name == 'acsd'",
+        "field": "_tmp.body",
+        "patterns": ["^%{GREEDYDATA:asus.wireless.info}\\s*$"],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.process?.name == 'acsd'", "field": "event.action", "value": "wireless-channel-selection" } },
+    { "set": { "if": "ctx.process?.name == 'acsd'", "field": "event.type", "value": ["change", "info"] } },
+
+    { "grok": {
+        "description": "roamast: the 5 message shapes observed across live AiMesh roaming activity.",
+        "if": "ctx.process?.name == 'roamast'",
+        "field": "_tmp.body",
+        "patterns": [
+          "^Roam a client\\s+\\[%{COMMONMAC:source.mac}\\],\\s+status\\s+\\[%{DATA:asus.roaming.status}\\]\\s*$",
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+remove client\\s+\\[%{COMMONMAC:source.mac}\\]\\s+from monitor list\\s*$",
+          "^%{NOTSPACE:asus.wireless.interface}:\\s+disconnect weak signal strength station\\s+\\[%{COMMONMAC:source.mac}\\]\\s*$",
+          "^\\[EXAP\\]Deauth old sta in\\s+%{NOTSPACE:asus.wireless.interface}:\\s+%{COMMONMAC:source.mac},\\s+because sta is already connected to\\s+%{COMMONMAC:destination.mac}\\.?\\s*$",
+          "^determine candidate node\\s+\\[%{COMMONMAC:destination.mac}\\]\\(rssi:\\s+%{NUMBER:asus.roaming.candidate_rssi:int}dbm\\)\\s+for client\\s+\\[%{COMMONMAC:source.mac}\\]\\(rssi:\\s+%{NUMBER:asus.roaming.client_rssi:int}dbm from client\\)\\(rssi:\\s+%{NUMBER:asus.roaming.ap_rssi:int}dbm from ap\\)\\s+to roam\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.process?.name == 'roamast'", "field": "event.dataset", "value": "roaming", "override": true } },
+    { "script": {
+        "description": "Classify roamast action from the raw body text (case-insensitive substring match, matching v8's proven approach since the 5 shapes above are not mutually exclusive to detect purely from which grok pattern matched).",
+        "if": "ctx.process?.name == 'roamast'",
+        "lang": "painless",
+        "source": "String m = ctx._tmp?.body != null ? ctx._tmp.body.toString().toLowerCase() : ''; if (m.contains('disconnect weak signal')) { ctx.event.put('action', 'roaming-disconnect-weak-signal'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (m.contains('deauth old sta')) { ctx.event.put('action', 'roaming-deauth-old-station'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'success'); } else if (m.contains('determine candidate node')) { ctx.event.put('action', 'roaming-candidate-selected'); ctx.event.put('type', ['info']); } else if (m.contains('remove client')) { ctx.event.put('action', 'roaming-remove-client-monitor'); ctx.event.put('type', ['info']); } else if (m.contains('roam a client')) { ctx.event.put('action', 'roaming-client'); ctx.event.put('type', ['change']); } else { ctx.event.put('action', 'roaming'); ctx.event.put('type', ['info']); } if (ctx.source?.mac != null) { ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); } if (ctx.destination?.mac != null) { ctx.destination.put('mac', ctx.destination.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } },
+
+    { "grok": {
+        "description": "bsd: BSS transition management. The entry pipeline's header grok only strips the OUTER 'bsd:' tag; these messages repeat the tag inside the body ('bsd: bsd: BSS Transit...'), so the inner 'bsd:' is stripped here.",
+        "if": "ctx.process?.name == 'bsd'",
+        "field": "_tmp.body",
+        "patterns": [
+          "^bsd:\\s+BSS Transit Response:\\s+ifname=%{NOTSPACE:asus.wireless.interface},\\s+event=%{INT:asus.roaming.event_id:int},\\s+token=%{INT:asus.roaming.token:int},\\s+status=%{INT:asus.roaming.status_code:int},\\s+mac=%{COMMONMAC:source.mac}\\s*$",
+          "^bsd:\\s+BSS Transit Response:\\s+not for interface\\s+%{NOTSPACE:asus.wireless.interface}\\s*$",
+          "^bsd:\\s+%{NOTSPACE:asus.wireless.interface}\\s+Sending act Frame to\\s+%{COMMONMAC:source.mac}\\s+with transition target\\s+%{NOTSPACE:asus.roaming.target_interface}\\s+ssid\\s+%{COMMONMAC:destination.mac}\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.process?.name == 'bsd'", "field": "event.dataset", "value": "roaming", "override": true } },
+    { "set": { "if": "ctx.process?.name == 'bsd'", "field": "event.action", "value": "bss-transition" } },
+    { "set": { "if": "ctx.process?.name == 'bsd'", "field": "event.type", "value": ["info"] } },
+    { "script": {
+        "if": "ctx.process?.name == 'bsd' && ctx.source?.mac != null",
+        "lang": "painless",
+        "source": "ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); if (ctx.destination?.mac != null) { ctx.destination.put('mac', ctx.destination.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } },
+
+    { "grok": {
+        "description": "kernel SBF radio/beamforming init -- only the SBF shape carries structured fields.",
+        "if": "ctx.process?.name == 'kernel' && ctx._tmp?.body != null && ctx._tmp.body.startsWith('SBF:')",
+        "field": "_tmp.body",
+        "patterns": [
+          "^SBF:\\s+%{WORD:asus.wireless.driver}:\\s+INIT\\s+\\[%{COMMONMAC:source.mac}\\]\\s+ID\\s+%{INT:asus.wireless.sbf_id:int}\\s+BFW\\s+%{INT:asus.wireless.sbf_bfw:int}\\s+THRSH\\s+%{INT:asus.wireless.sbf_threshold:int}\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "grok": {
+        "description": "kernel not-mesh-client / not-exist-in-UDB -- both shapes lead with the station MAC.",
+        "if": "ctx.process?.name == 'kernel' && ctx._tmp?.body != null && (ctx._tmp.body.contains('not mesh client') || ctx._tmp.body.contains('not exist in UDB'))",
+        "field": "_tmp.body",
+        "patterns": ["^%{COMMONMAC:source.mac}\\s+%{GREEDYDATA:asus.wireless.info}\\s*$"],
+        "ignore_failure": true
+    } },
+    { "script": {
+        "description": "Classify kernel-sourced wireless driver/firmware messages by content (no daemon tag is available to key off).",
+        "if": "ctx.process?.name == 'kernel'",
+        "lang": "painless",
+        "source": "String b = ctx._tmp?.body != null ? ctx._tmp.body.toString() : ''; if (b.startsWith('SBF:')) { ctx.event.put('action', 'wireless-sbf-init'); ctx.event.put('type', ['info']); } else if (b.contains('not mesh client')) { ctx.event.put('action', 'wireless-mesh-client-operation-failed'); ctx.event.put('type', ['info']); ctx.event.put('outcome', 'failure'); } else if (b.contains('not exist in UDB')) { ctx.event.put('action', 'wireless-udb-client-operation-failed'); ctx.event.put('type', ['info']); ctx.event.put('outcome', 'failure'); } else if (b.contains('WLC_SCB_DEAUTHORIZE')) { ctx.event.put('action', 'wireless-kernel-deauthorize-error'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (b.contains('WLC_SCB_DEAUTHENTICATE_FOR_REASON')) { ctx.event.put('action', 'wireless-kernel-deauthenticate-error'); ctx.event.put('type', ['connection', 'end']); ctx.event.put('outcome', 'failure'); } else if (b.contains('CFG80211-ERROR')) { ctx.event.put('action', 'wireless-cfg80211-error'); ctx.event.put('type', ['info']); ctx.event.put('outcome', 'failure'); } else { ctx.event.put('action', 'wireless-kernel'); ctx.event.put('type', ['info']); } if (ctx.source?.mac != null) { ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } }
+  ]
+}

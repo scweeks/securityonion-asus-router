@@ -1,0 +1,24 @@
+{
+  "description": "ASUS auth dataset (dropbear SSH). Called from the asus entry pipeline when process.name == 'dropbear'.",
+  "processors": [
+    { "set": { "field": "event.dataset", "value": "auth" } },
+    { "set": { "field": "category", "value": "authentication" } },
+    { "set": { "field": "event.provider", "value": "dropbear" } },
+    { "grok": {
+        "field": "_tmp.body",
+        "patterns": [
+          "^Login succeeded for '%{DATA:user.name}' from %{IP:source.ip}:%{POSINT:source.port:int}\\s*$",
+          "^Bad password attempt for '%{DATA:user.name}' from %{IP:source.ip}:%{POSINT:source.port:int}\\s*$",
+          "^Login attempt for nonexistent user from %{IP:source.ip}:%{POSINT:source.port:int}\\s*$",
+          "^%{GREEDYDATA:asus.auth.info}\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "script": {
+        "description": "Classify the dropbear outcome from the body text.",
+        "lang": "painless",
+        "source": "String body = ctx._tmp?.body != null ? ctx._tmp.body.toString() : ''; if (body.contains('succeeded')) { ctx.event.put('type', ['start']); ctx.event.put('outcome', 'success'); ctx.event.put('action', 'ssh-login'); } else if (body.contains('Bad password') || body.contains('nonexistent user')) { ctx.event.put('type', ['start']); ctx.event.put('outcome', 'failure'); ctx.event.put('action', 'ssh-login'); }",
+        "ignore_failure": true
+    } }
+  ]
+}

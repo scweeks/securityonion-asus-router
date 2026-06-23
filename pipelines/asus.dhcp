@@ -1,0 +1,23 @@
+{
+  "description": "ASUS dnsmasq dataset. Called from the asus entry pipeline whenever process.name starts with 'dnsmasq' (covers both the bare 'dnsmasq:' tag and the 'dnsmasq-dhcp:' tag observed in live Asus traffic). DHCP lease action lines get dataset 'dhcp'; anything else (e.g. DNS-rebind warnings) gets dataset 'dns'.",
+  "processors": [
+    { "set": { "field": "event.provider", "value": "{{{process.name}}}" } },
+    { "set": { "field": "category", "value": "network" } },
+    { "grok": {
+        "description": "DHCP lease action shape: ACTION(iface) ip mac [hostname]. Falls through to a generic capture if the line doesn't match this shape at all.",
+        "field": "_tmp.body",
+        "patterns": [
+          "^%{WORD:_tmp.dhcp_action}\\(%{NOTSPACE:asus.dhcp.interface}\\)\\s+%{IP:source.ip}\\s+%{COMMONMAC:source.mac}(?:\\s+%{GREEDYDATA:source.domain})?\\s*$",
+          "^%{WORD:_tmp.dhcp_action}\\(%{NOTSPACE:asus.dhcp.interface}\\)\\s+%{COMMONMAC:source.mac}(?:\\s+%{GREEDYDATA:asus.dhcp.info})?\\s*$",
+          "^%{GREEDYDATA:asus.dns.info}\\s*$"
+        ],
+        "ignore_failure": true
+    } },
+    { "script": {
+        "description": "Decide dhcp vs dns based on whether the DHCP-action shape actually matched, then normalize the action and MAC.",
+        "lang": "painless",
+        "source": "if (ctx._tmp?.dhcp_action != null) { ctx.event.put('dataset', 'dhcp'); ctx.event.put('action', ctx._tmp.dhcp_action.toString().toLowerCase()); } else { ctx.event.put('dataset', 'dns'); ctx.event.put('action', 'dnsmasq'); ctx.event.put('type', ['info']); } if (ctx.source?.mac != null) { ctx.source.put('mac', ctx.source.mac.replace(':', '-').toUpperCase()); }",
+        "ignore_failure": true
+    } }
+  ]
+}

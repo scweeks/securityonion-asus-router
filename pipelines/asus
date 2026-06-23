@@ -1,0 +1,210 @@
+{
+  "description": "ASUS ROG router (GT-BE98 Pro / GT-AXE16000, AiMesh) syslog entry point -- v9. Parses the BSD syslog header directly from the original `message` field using a single corrected grok pattern, independent of whatever the platform's own upstream `syslog` pipeline did or did not manage to extract (that pipeline's patterns either require a literal <PRI> prefix this traffic may not carry, or use %{WORD} for the program name, which cannot match hyphenated daemon names like dnsmasq-dhcp or avahi-daemon at all). Replaces v1-v8: those re-derived process.name from an already-stripped remainder using an unanchored PROG fallback, which misidentified wireless interface names (e.g. wl1.2) as the process name for hostapd traffic -- root-caused and fixed here by always parsing the header fresh, with an optional-hostname capture that cannot itself swallow a colon-terminated program tag. Dispatches to asus.firewall / asus.wireless / asus.dhcp / asus.auth / asus.system based on the corrected process.name.",
+  "processors": [
+    {
+      "set": {
+        "description": "Shared identity fields, set once for every Asus event regardless of dataset.",
+        "field": "event.module",
+        "value": "asus"
+      }
+    },
+    {
+      "set": {
+        "field": "event.kind",
+        "value": "event"
+      }
+    },
+    {
+      "remove": {
+        "description": "Clear the upstream syslog pipeline's default event.dataset value ('syslog') before dispatch. All five dispatch conditions gate on ctx.event?.dataset == null, so without this step none of them fire in production -- every event falls through with dataset still 'syslog' and lands as asus.syslog after common concatenates.",
+        "field": "event.dataset",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "grok": {
+        "description": "The fix: parse the header from the ORIGINAL message field, never from real_message/source.application. The optional hostname slot uses a custom pattern that excludes ':' so it can never greedily absorb a colon-terminated program tag (the mechanism that caused process.name to resolve to a wireless interface name like wl1.2 in v1-v8). <PRI> and hostname are both optional since live Asus traffic has been observed both with and without each.",
+        "field": "message",
+        "pattern_definitions": {
+          "ASUSHOST": "[^\\s:]+"
+        },
+        "patterns": [
+          "^(?:<%{POSINT:syslog.priority:int}>)?%{SYSLOGTIMESTAMP:syslog.timestamp}\\s+(?:%{ASUSHOST:syslog.host}\\s+)?%{PROG:process.name}(?:\\[%{POSINT:process.pid:int}\\])?:\\s*%{GREEDYDATA:_tmp.body}",
+          "^%{GREEDYDATA:_tmp.body}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "set": {
+        "if": "ctx.syslog?.host != null",
+        "field": "host.name",
+        "value": "{{{syslog.host}}}",
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "description": "Derive syslog severity/facility from priority, writing to the same field locations and vocabulary the platform's own syslog pipeline uses, so the result is correct and consistent even when that pipeline's own <PRI>-dependent grok does not fire for this traffic. Also mirrors into the nested log.syslog.* ECS location.",
+        "lang": "painless",
+        "params": {
+          "level": [
+            "EMERG",
+            "ALERT",
+            "CRIT",
+            "ERR",
+            "WARN",
+            "NOTICE",
+            "INFO",
+            "DEBUG"
+          ],
+          "facility": [
+            "KERN",
+            "USER",
+            "MAIL",
+            "DAEMON",
+            "AUTH",
+            "SYSLOG",
+            "LPR",
+            "NEWS",
+            "UUCP",
+            "CRON",
+            "AUTHPRIV",
+            "FTP",
+            "NTP",
+            "SECURITY",
+            "CONSOLE",
+            "SOLARIS-CRON",
+            "LOCAL0",
+            "LOCAL1",
+            "LOCAL2",
+            "LOCAL3",
+            "LOCAL4",
+            "LOCAL5",
+            "LOCAL6",
+            "LOCAL7"
+          ]
+        },
+        "source": "if (ctx.syslog != null && ctx.syslog.priority != null) { int p = ctx.syslog.priority; int f = p / 8; int l = p - (f * 8); ctx.syslog.put('severity', l); ctx.syslog.put('severity_label', params.level[l]); ctx.syslog.put('facility', f); if (f >= 0 && f < 24) { ctx.syslog.put('facility_label', params.facility[f]); } if (ctx.log == null) { ctx.log = new HashMap(); } if (ctx.log.syslog == null) { ctx.log.syslog = new HashMap(); } ctx.log.syslog.put('priority', p); Map sevMap = new HashMap(); sevMap.put('code', l); sevMap.put('name', params.level[l]); ctx.log.syslog.put('severity', sevMap); if (f >= 0 && f < 24) { Map facMap = new HashMap(); facMap.put('code', f); facMap.put('name', params.facility[f]); ctx.log.syslog.put('facility', facMap); } }",
+        "ignore_failure": true
+      }
+    },
+    {
+      "pipeline": {
+        "description": "kernel netfilter firewall logging (ACCEPT/DROP/REJECT with SRC=/DST=)",
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'kernel' && ctx._tmp?.body != null && ctx._tmp.body.contains('SRC=') && ctx._tmp.body.contains('DST=')",
+        "name": "asus.firewall",
+        "ignore_failure": true
+      }
+    },
+    {
+      "pipeline": {
+        "description": "RF/association-layer events: hostapd, wlceventd, acsd, roamast, bsd, plus kernel-sourced wireless driver/firmware errors (no userspace daemon tag, recognized by content: SBF:, WLC_SCB_*, CFG80211-ERROR, not mesh client, not exist in UDB)",
+        "if": "ctx.event?.dataset == null && (ctx.process?.name == 'hostapd' || ctx.process?.name == 'wlceventd' || ctx.process?.name == 'acsd' || ctx.process?.name == 'roamast' || ctx.process?.name == 'bsd' || (ctx.process?.name == 'kernel' && ctx._tmp?.body != null && (ctx._tmp.body.startsWith('SBF:') || ctx._tmp.body.contains('WLC_SCB_') || ctx._tmp.body.contains('CFG80211-ERROR') || ctx._tmp.body.contains('not mesh client') || ctx._tmp.body.contains('not exist in UDB'))))",
+        "name": "asus.wireless",
+        "ignore_failure": true
+      }
+    },
+    {
+      "pipeline": {
+        "description": "dnsmasq DHCP lease activity and DNS-layer warnings",
+        "if": "ctx.event?.dataset == null && ctx.process?.name != null && ctx.process.name.startsWith('dnsmasq')",
+        "name": "asus.dhcp",
+        "ignore_failure": true
+      }
+    },
+    {
+      "pipeline": {
+        "description": "dropbear SSH authentication",
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'dropbear'",
+        "name": "asus.auth",
+        "ignore_failure": true
+      }
+    },
+    {
+      "pipeline": {
+        "description": "Catch-all: avahi-daemon (mdns), miniupnpd (upnp), remaining kernel messages (usb/bridge-state/crash-dump/generic), and anything unrecognized.",
+        "if": "ctx.event?.dataset == null",
+        "name": "asus.system",
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "description": "Identify which physical router emitted the event from the listener source address. Sets a default observer.type of 'router'; asus.firewall overrides this to 'firewall' for that dataset specifically, and since that sub-pipeline already ran by this point, this step must not clobber an override already in place.",
+        "lang": "painless",
+        "source": "String ip = null; if (ctx.log != null && ctx.log.source != null && ctx.log.source.address != null) { String addr = ctx.log.source.address.toString(); int idx = addr.indexOf(':'); ip = idx > 0 ? addr.substring(0, idx) : addr; } if (ctx.observer == null) { ctx.observer = new HashMap(); } ctx.observer.put('vendor', 'ASUSTeK'); if (ctx.observer.type == null) { ctx.observer.put('type', 'router'); } if ('192.0.2.1'.equals(ip)) { ctx.observer.put('name', 'GT-BE98-Pro'); ctx.observer.put('product', 'ROG Rapture GT-BE98 Pro'); } else if ('192.0.2.2'.equals(ip)) { ctx.observer.put('name', 'GT-AXE16000'); ctx.observer.put('product', 'ROG Rapture GT-AXE16000'); }",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "if": "ctx.source?.ip != null",
+        "field": "related.ip",
+        "value": "{{{source.ip}}}",
+        "allow_duplicates": false
+      }
+    },
+    {
+      "append": {
+        "if": "ctx.destination?.ip != null",
+        "field": "related.ip",
+        "value": "{{{destination.ip}}}",
+        "allow_duplicates": false
+      }
+    },
+    {
+      "append": {
+        "if": "ctx.user?.name != null",
+        "field": "related.user",
+        "value": "{{{user.name}}}",
+        "allow_duplicates": false
+      }
+    },
+    {
+      "date": {
+        "description": "Asus logs local time with no timezone in the BSD timestamp. The platform's own syslog pipeline already ran this same conversion assuming UTC; this deliberately re-runs it with the correct timezone to overwrite that assumption. Not redundant -- required for a correct @timestamp.",
+        "if": "ctx.syslog?.timestamp != null",
+        "field": "syslog.timestamp",
+        "target_field": "@timestamp",
+        "formats": [
+          "MMM  d HH:mm:ss",
+          "MMM dd HH:mm:ss"
+        ],
+        "timezone": "America/New_York",
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "field": "tags",
+        "value": "asus",
+        "allow_duplicates": false
+      }
+    },
+    {
+      "remove": {
+        "field": "_tmp",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    }
+  ],
+  "on_failure": [
+    {
+      "remove": {
+        "field": "_tmp",
+        "ignore_missing": true,
+        "ignore_failure": true
+      }
+    },
+    {
+      "append": {
+        "field": "tags",
+        "value": "asus_parse_failure",
+        "allow_duplicates": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "description": "ASUS catch-all datasets. Called from the asus entry pipeline only after firewall/wireless/dhcp/auth have all been ruled out. Handles avahi-daemon, miniupnpd, the remaining kernel message shapes (usb, bridge port state, crash dumps), service-start lines, and a final generic fallback for anything unrecognized (e.g. cfg_server).",
+  "processors": [
+    { "set": { "field": "event.provider", "value": "{{{process.name}}}" } },
+
+    { "set": { "if": "ctx.process?.name == 'avahi-daemon'", "field": "event.dataset", "value": "mdns" } },
+    { "set": { "if": "ctx.process?.name == 'avahi-daemon'", "field": "category", "value": "network" } },
+    { "set": { "if": "ctx.process?.name == 'avahi-daemon'", "field": "event.action", "value": "mdns" } },
+    { "set": { "if": "ctx.process?.name == 'avahi-daemon'", "field": "event.type", "value": ["info"] } },
+
+    { "grok": {
+        "description": "miniupnpd messages are free-form text, passed through as-is.",
+        "if": "ctx.process?.name == 'miniupnpd'",
+        "field": "_tmp.body",
+        "patterns": ["^%{GREEDYDATA:asus.upnp.info}\\s*$"],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.process?.name == 'miniupnpd'", "field": "event.dataset", "value": "upnp" } },
+    { "set": { "if": "ctx.process?.name == 'miniupnpd'", "field": "category", "value": "network" } },
+    { "set": { "if": "ctx.process?.name == 'miniupnpd'", "field": "event.action", "value": "upnp-event" } },
+    { "set": { "if": "ctx.process?.name == 'miniupnpd'", "field": "event.type", "value": ["info"] } },
+    { "set": {
+        "if": "ctx.process?.name == 'miniupnpd' && ctx.asus?.upnp?.info != null && ctx.asus.upnp.info.toString().toLowerCase().contains('error')",
+        "field": "event.outcome",
+        "value": "failure"
+    } },
+
+    { "set": {
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'kernel' && ctx._tmp?.body != null && ctx._tmp.body.contains('usbcore:')",
+        "field": "event.dataset", "value": "usb"
+    } },
+    { "set": {
+        "if": "ctx.event?.dataset == 'usb'",
+        "field": "category", "value": "host"
+    } },
+    { "set": { "if": "ctx.event?.dataset == 'usb'", "field": "event.action", "value": "usb" } },
+    { "set": { "if": "ctx.event?.dataset == 'usb'", "field": "event.type", "value": ["info"] } },
+
+    { "grok": {
+        "description": "bridge port state transitions, e.g. 'br0: port 3(eth2) entered forwarding state'.",
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'kernel' && ctx._tmp?.body != null && ctx._tmp.body.contains(' entered ') && ctx._tmp.body.contains(' state')",
+        "field": "_tmp.body",
+        "patterns": ["^%{NOTSPACE:asus.network.bridge}:\\s+port\\s+%{INT:asus.network.port:int}\\(%{NOTSPACE:asus.network.interface}\\)\\s+entered\\s+%{WORD:asus.network.state}\\s+state\\s*$"],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.asus?.network?.state != null", "field": "event.dataset", "value": "network" } },
+    { "set": { "if": "ctx.asus?.network?.state != null", "field": "category", "value": "network" } },
+    { "set": { "if": "ctx.asus?.network?.state != null", "field": "event.action", "value": "bridge-port-state" } },
+    { "set": { "if": "ctx.asus?.network?.state != null", "field": "event.type", "value": ["change"] } },
+
+    { "script": {
+        "description": "Kernel crash-dump / backtrace / register-dump detection: 'fatal signal', ===DDD=== markers, CPU:/Hardware name:/pc :/lr :/sp :/pstate: line starts, register-dump lines (x0 :, x1 :, ...), or backtrace-frame-shaped lines.",
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'kernel'",
+        "lang": "painless",
+        "source": "String b = ctx._tmp?.body != null ? ctx._tmp.body.toString().trim() : ''; String l = b.toLowerCase(); boolean isCrash = false; if (l.contains('fatal signal') || b.startsWith('===DDD===') || b.startsWith('CPU:') || b.startsWith('Hardware name:') || b.startsWith('pc :') || b.startsWith('lr :') || b.startsWith('sp :') || b.startsWith('pstate:')) { isCrash = true; } if (!isCrash && b.length() > 2 && b.startsWith('x')) { int colon = b.indexOf(':'); if (colon > 1 && colon < 4) { isCrash = true; } } if (!isCrash && b.contains(' - ') && b.contains(', [') && b.endsWith(']')) { isCrash = true; } if (isCrash) { if (ctx.asus == null) { ctx.asus = new HashMap(); } if (ctx.asus.kernel == null) { ctx.asus.kernel = new HashMap(); } ctx.asus.kernel.info = b; ctx.event.put('dataset', 'kernel'); ctx.event.put('category', 'host'); ctx.event.put('action', l.contains('fatal signal') ? 'kernel-fatal-signal' : 'kernel-crash-dump'); ctx.event.put('type', ['info']); if (l.contains('fatal signal')) { ctx.event.put('outcome', 'failure'); } }",
+        "ignore_failure": true
+    } },
+
+    { "grok": {
+        "description": "Service-start announcements (e.g. 'start httpd:8080'), regardless of which daemon logged them.",
+        "if": "ctx.event?.dataset == null && ctx._tmp?.body != null && (ctx._tmp.body.contains('start httpd:') || ctx._tmp.body.contains('start https:'))",
+        "field": "_tmp.body",
+        "patterns": ["start\\s+%{WORD:asus.service.name}:%{POSINT:asus.service.port:int}"],
+        "ignore_failure": true
+    } },
+    { "set": { "if": "ctx.asus?.service?.name != null", "field": "event.dataset", "value": "service" } },
+    { "set": { "if": "ctx.asus?.service?.name != null", "field": "category", "value": "configuration" } },
+    { "set": { "if": "ctx.asus?.service?.name != null", "field": "event.action", "value": "service-start" } },
+    { "set": { "if": "ctx.asus?.service?.name != null", "field": "event.type", "value": ["start"] } },
+    { "set": { "if": "ctx.asus?.service?.name != null", "field": "event.outcome", "value": "success" } },
+
+    { "set": {
+        "if": "ctx.event?.dataset == null && ctx.process?.name == 'kernel'",
+        "field": "event.dataset", "value": "system"
+    } },
+    { "set": { "if": "ctx.event?.dataset == 'system' && ctx.process?.name == 'kernel'", "field": "event.action", "value": "kernel-message" } },
+
+    { "set": { "if": "ctx.event?.dataset == null", "field": "event.dataset", "value": "system" } },
+    { "set": { "if": "ctx.event?.action == null", "field": "event.action", "value": "system" } },
+    { "set": { "if": "ctx.category == null && ctx.event?.dataset == 'system'", "field": "category", "value": "host" } },
+    { "set": { "if": "ctx.event?.type == null", "field": "event.type", "value": ["info"] } }
+  ]
+}

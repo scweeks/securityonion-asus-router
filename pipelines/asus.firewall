@@ -1,0 +1,65 @@
+{
+  "description": "ASUS firewall dataset (kernel netfilter ACCEPT/DROP/REJECT logging). Called only from the asus entry pipeline once process.name=='kernel' and SRC=/DST= presence has already confirmed this is a firewall line.",
+  "processors": [
+    {
+      "set": {
+        "field": "event.dataset",
+        "value": "firewall"
+      }
+    },
+    {
+      "set": {
+        "field": "category",
+        "value": "network"
+      }
+    },
+    {
+      "set": {
+        "field": "observer.type",
+        "value": "firewall",
+        "override": true
+      }
+    },
+    {
+      "set": {
+        "field": "event.provider",
+        "value": "kernel"
+      }
+    },
+    {
+      "grok": {
+        "description": "Split off the rule action (bare ACCEPT/DROP/REJECT, or the alternate IPTables-<action>: prefix form) from the netfilter key=value field list.",
+        "field": "_tmp.body",
+        "patterns": [
+          "^IPTables-%{WORD:asus.firewall.action}:\\s+%{GREEDYDATA:_tmp.nf}",
+          "^%{WORD:asus.firewall.action}\\s+%{GREEDYDATA:_tmp.nf}"
+        ],
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "description": "Tokenize netfilter key=value pairs; collect bare TCP/IP flag tokens. The IP header and an inner transport header can each carry their own LEN=, so the second occurrence is kept separately as L4_LEN rather than overwriting the first.",
+        "if": "ctx._tmp?.nf != null",
+        "lang": "painless",
+        "source": "Map nf = new HashMap(); List tcpFlags = new ArrayList(); List ipFlags = new ArrayList(); for (String tok : ctx._tmp.nf.splitOnToken(' ')) { if (tok == null || tok.length() == 0) continue; int eq = tok.indexOf('='); if (eq > 0) { String k = tok.substring(0, eq); String v = (eq < tok.length() - 1) ? tok.substring(eq + 1) : ''; if (k == 'LEN' && nf.containsKey('LEN')) { nf.put('L4_LEN', v); } else { nf.put(k, v); } } else if (tok == 'SYN' || tok == 'ACK' || tok == 'FIN' || tok == 'RST' || tok == 'PSH' || tok == 'URG' || tok == 'ECE' || tok == 'CWR' || tok == 'NS') { tcpFlags.add(tok.toLowerCase()); } else if (tok == 'DF' || tok == 'MF' || tok == 'CE') { ipFlags.add(tok.toLowerCase()); } } ctx._tmp.put('nfmap', nf); if (!tcpFlags.isEmpty()) { ctx._tmp.put('tcpflags', tcpFlags); } if (!ipFlags.isEmpty()) { ctx._tmp.put('ipflags', ipFlags); }",
+        "ignore_failure": true
+      }
+    },
+    {
+      "script": {
+        "description": "Map netfilter fields to ECS: action/type/outcome, source/destination ip+port+mac, network transport/protocol/type/direction, ingress/egress interface, and the remaining packet details under asus.firewall.*",
+        "if": "ctx._tmp?.nfmap != null",
+        "lang": "painless",
+        "source": "Map nf = ctx._tmp.nfmap; if (ctx.asus == null) { ctx.asus = new HashMap(); } if (ctx.asus.firewall == null) { ctx.asus.firewall = new HashMap(); } Map fw = ctx.asus.firewall; String rawAct = ctx.asus.firewall.action; if (rawAct != null) { String act = rawAct.toLowerCase(); if (act == 'dropped') { act = 'drop'; } else if (act == 'accepted') { act = 'accept'; } else if (act == 'rejected') { act = 'reject'; } fw.put('action', act); ctx.event.put('action', act); if (act == 'accept') { ctx.event.put('type', ['connection','allowed']); ctx.event.put('outcome', 'success'); } else if (act == 'drop' || act == 'reject') { ctx.event.put('type', ['connection','denied']); ctx.event.put('outcome', 'failure'); } } if (ctx.source == null) { ctx.source = new HashMap(); } if (ctx.destination == null) { ctx.destination = new HashMap(); } if (ctx.network == null) { ctx.network = new HashMap(); } if (nf.containsKey('SRC') && nf.SRC != '') { ctx.source.put('ip', nf.SRC); } if (nf.containsKey('DST') && nf.DST != '') { ctx.destination.put('ip', nf.DST); } try { if (nf.containsKey('SPT') && nf.SPT != '') { ctx.source.put('port', Integer.parseInt(nf.SPT)); } } catch (Exception e) {} try { if (nf.containsKey('DPT') && nf.DPT != '') { ctx.destination.put('port', Integer.parseInt(nf.DPT)); } } catch (Exception e) {} String proto = nf.PROTO; if (proto != null && proto != '') { Map protomap = ['1':'icmp','2':'igmp','6':'tcp','17':'udp','41':'ipv6','47':'gre','50':'esp','51':'ah','58':'ipv6-icmp','132':'sctp']; String p = proto.toLowerCase(); if (protomap.containsKey(p)) { p = protomap.get(p); ctx.network.put('iana_number', proto); } ctx.network.put('transport', p); ctx.network.put('protocol', p); } String sip = ctx.source.ip; String dip = ctx.destination.ip; if ((sip != null && sip.contains(':')) || (dip != null && dip.contains(':'))) { ctx.network.put('type', 'ipv6'); } else if (sip != null || dip != null) { ctx.network.put('type', 'ipv4'); } if (nf.containsKey('IN') && nf.IN != '') { if (ctx.observer == null) { ctx.observer = new HashMap(); } Map ing = new HashMap(); Map ingIf = new HashMap(); ingIf.put('name', nf.IN); ing.put('interface', ingIf); ctx.observer.put('ingress', ing); } if (nf.containsKey('OUT') && nf.OUT != '') { if (ctx.observer == null) { ctx.observer = new HashMap(); } Map eg = new HashMap(); Map egIf = new HashMap(); egIf.put('name', nf.OUT); eg.put('interface', egIf); ctx.observer.put('egress', eg); } String inIf = nf.containsKey('IN') ? nf.IN : ''; String outIf = nf.containsKey('OUT') ? nf.OUT : ''; if (inIf != '' && outIf != '') { ctx.network.put('direction', inIf.startsWith('eth') ? 'inbound' : 'outbound'); } else if (inIf.startsWith('eth')) { ctx.network.put('direction', 'inbound'); } else if (inIf != '') { ctx.network.put('direction', 'outbound'); } String mac = nf.MAC; if (mac != null && mac.length() >= 41) { String dmac = mac.substring(0,17).replace(':','-').toUpperCase(); String smac = mac.substring(18,35).replace(':','-').toUpperCase(); String etype = mac.substring(36); ctx.destination.put('mac', dmac); ctx.source.put('mac', smac); fw.put('ethertype', etype); } try { if (nf.containsKey('LEN') && nf.LEN != '') { fw.put('packet_length', Integer.parseInt(nf.LEN)); } } catch (Exception e) {} try { if (nf.containsKey('L4_LEN') && nf.L4_LEN != '') { fw.put('transport_length', Integer.parseInt(nf.L4_LEN)); } } catch (Exception e) {} try { if (nf.containsKey('TTL') && nf.TTL != '') { fw.put('ttl', Integer.parseInt(nf.TTL)); } } catch (Exception e) {} if (nf.containsKey('TOS') && nf.TOS != '') { fw.put('tos', nf.TOS); } if (nf.containsKey('PREC') && nf.PREC != '') { fw.put('precedence', nf.PREC); } if (nf.containsKey('ID') && nf.ID != '') { fw.put('ip_id', nf.ID); } try { if (nf.containsKey('WINDOW') && nf.WINDOW != '') { fw.put('tcp_window', Integer.parseInt(nf.WINDOW)); } } catch (Exception e) {} if (nf.containsKey('MARK') && nf.MARK != '') { fw.put('mark', nf.MARK); } if (ctx._tmp.tcpflags != null) { fw.put('tcp_flags', ctx._tmp.tcpflags); } if (ctx._tmp.ipflags != null) { fw.put('ip_flags', ctx._tmp.ipflags); }",
+        "ignore_failure": true
+      }
+    },
+    {
+      "community_id": {
+        "if": "ctx.source?.ip != null && ctx.destination?.ip != null",
+        "ignore_failure": true
+      }
+    }
+  ]
+}
