@@ -82,6 +82,23 @@ after initial setup.
 | `asus.kernel` | kernel crash dumps / fatal signals |
 | `asus.system` | catch-all for unrecognized daemons (e.g. cfg\_server) |
 
+
+### event.dataset at each pipeline stage
+
+The value of `event.dataset` changes as the event moves through the pipeline
+chain. This affects where you look depending on whether you are using
+`_simulate` in Dev Tools or querying indexed events in Hunt:
+
+| Stage | `event.module` | `event.dataset` | Where you see this |
+|---|---|---|---|
+| Inside sub-pipeline (e.g. `asus.wireless`) | `asus` | `wireless` | `_simulate` against `asus` or sub-pipeline directly |
+| After SO `common` pipeline / indexed in Elasticsearch | `asus` | `asus.wireless` | Hunt queries, dashboards, detections |
+
+The SO `common` pipeline concatenates `event.module` + `.` + `event.dataset`
+when `event.dataset` contains no dot. All Hunt queries in this README use the
+**post-common** fully qualified values (e.g. `asus.firewall`, `asus.wireless`).
+Simulate output against the `asus` entry pipeline alone will show bare suffixes.
+
 ## ECS fields reference
 
 Key fields populated per dataset. All datasets also receive `event.module`,
@@ -225,6 +242,37 @@ sudo tcpdump -i any -n udp port 514 -c 20
 You should see packets from your router IPs within a few seconds.
 
 ---
+
+
+## Security considerations
+
+### UDP syslog trust boundary
+
+ASUS stock firmware sends syslog over unauthenticated UDP (port 514). UDP is
+connectionless and spoofable — a host on the same network segment could inject
+fake `kernel`, `dropbear`, `dnsmasq`, or wireless events that appear to
+originate from a trusted router IP. This is a protocol limitation of syslog
+itself, not a defect in this parser.
+
+**Mitigations:**
+
+- Place routers and the Security Onion manager on a dedicated management or
+  logging VLAN, isolated from general-purpose network segments
+- Apply switch-level or firewall ACLs so only your specific router IPs can
+  send UDP 514 to the SO manager
+- Restrict the Security Onion `syslog` hostgroup to your router IPs only
+- Monitor for unexpected source addresses:
+
+```
+event.module:"asus" AND NOT log.source.address:("192.0.2.1" OR "192.0.2.2" OR "192.0.2.1:514" OR "192.0.2.2:514")
+```
+
+Replace the example IPs with your actual router IPs. Any event matching this
+query came from an unexpected source and warrants investigation.
+
+If your network enforces strict segmentation and ACLs, the residual spoofing
+risk is low. If routers and workstations share the same flat network, treat
+router syslog as advisory data rather than authoritative audit evidence.
 
 ## Installation
 
@@ -451,6 +499,41 @@ connected to, not the primary router. The `observer.name` field will reflect
 whichever device's source IP the log arrived from.
 
 ---
+
+
+## Monitoring parser health
+
+The `asus` entry pipeline tags every event with `asus` and any parse failure
+with `asus_parse_failure`. Use these Hunt queries to monitor pipeline health
+and catch silent classification problems:
+
+**Active parse failures — investigate immediately:**
+```
+event.module:"asus" AND tags:"asus_parse_failure"
+```
+
+**Events that landed in the catch-all but shouldn't have — indicates a new
+daemon shape not yet handled by the parser:**
+```
+event.dataset:"asus.system" AND process.name:(kernel OR hostapd OR wlceventd OR dnsmasq* OR dropbear OR roamast OR bsd OR acsd)
+```
+
+**Unexpected source addresses — possible log injection or misconfiguration:**
+```
+event.module:"asus" AND NOT log.source.address:("192.0.2.1" OR "192.0.2.2" OR "192.0.2.1:514" OR "192.0.2.2:514")
+```
+*(Replace example IPs with your actual router IPs)*
+
+**Dataset distribution — run periodically as a sanity check:**
+```
+event.module:"asus" | groupby event.dataset
+```
+
+A healthy deployment should show the vast majority of events in `asus.firewall`
+with smaller counts in `asus.wireless`, and zero or near-zero `asus_parse_failure`
+tagged events. A sudden shift in the distribution or a spike in failures after
+a router firmware update is the signal to check whether new log shapes need
+parser coverage.
 
 ## Troubleshooting
 
