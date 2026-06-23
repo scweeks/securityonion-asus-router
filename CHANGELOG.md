@@ -7,6 +7,31 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+- Enabled GitHub Private Vulnerability Reporting; updated SECURITY.md to
+  reference it with response SLAs and coordinated disclosure process
+- Added CI step that scans every PR for accidental RFC 1918 private IP address
+  commits, failing the build if any are found
+
+### Added
+- Security considerations section in README covering UDP syslog trust boundary,
+  network ACL guidance, and a Hunt query for unexpected source addresses
+- Parser health monitoring section in README with Hunt queries for parse
+  failures, unexpected catch-all events, unexpected source addresses, and
+  dataset distribution baseline
+- `event.dataset` stage clarification table in README explaining bare suffix
+  values inside sub-pipelines vs. qualified values after SO `common` pipeline
+  processes events in Hunt
+- Expanded SOUP upgrade runbook with post-update verification steps, simulate
+  test, Hunt baseline check, and version compatibility matrix
+- `.github/workflows/release.yml` — automatically generates a SHA-256 hash
+  manifest of all pipeline and test files and uploads it as a `manifest.sha256`
+  release asset whenever a GitHub release is published
+
+### Changed
+- Updated `actions/setup-python` from v5 to v6 (Node.js 24 native; clears
+  the remaining deprecation warning in GitHub Actions)
+
 ## [1.0.0] - 2026-06-23
 
 Initial public release. Complete rewrite of the v1–v8 single-file parser into

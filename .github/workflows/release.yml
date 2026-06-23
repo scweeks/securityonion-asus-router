@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+
+# Deny all by default; the manifest job explicitly grants what it needs.
+permissions: {}
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # required to upload the manifest as a release asset
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Generate SHA-256 manifest
+        run: |
+          sha256sum \
+            pipelines/asus \
+            pipelines/asus.firewall \
+            pipelines/asus.wireless \
+            pipelines/asus.dhcp \
+            pipelines/asus.auth \
+            pipelines/asus.system \
+            tests/simulate_v9.py \
+            tests/run_tests.py \
+            > manifest.sha256
+
+          echo "## 📋 Release manifest" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "SHA-256 hashes for all pipeline and test files:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat manifest.sha256 >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Uploaded as \`manifest.sha256\` release asset." >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload manifest as release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} \
+            manifest.sha256 \
+            --clobber

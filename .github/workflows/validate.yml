@@ -55,3 +55,30 @@ jobs:
           echo '```' >> $GITHUB_STEP_SUMMARY
           cat /tmp/test_results.txt >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Scan for accidental private IP commits
+        run: |
+          # Scans for RFC 1918 private addresses that should never appear in repo files.
+          # RFC 5737 documentation ranges (192.0.2.x, 198.51.100.x, 203.0.113.x) are
+          # intentionally used throughout and will not match these patterns.
+          # README contains 192.168.x.1 with literal 'x' — not matched by [0-9]{1,3}.
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🔒 Privacy Scan" >> $GITHUB_STEP_SUMMARY
+          FOUND=$(grep -rInE \
+            '(10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3})' \
+            --exclude-dir=.git \
+            . 2>/dev/null || true)
+          if [ -n "$FOUND" ]; then
+            echo "❌ RFC 1918 private IP address found — remove before merging" \
+              | tee -a /tmp/privacy_results.txt
+            echo "$FOUND" | tee -a /tmp/privacy_results.txt
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/privacy_results.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ No private IP addresses found" | tee -a /tmp/privacy_results.txt
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/privacy_results.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
