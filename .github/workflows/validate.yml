@@ -6,12 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+# Deny all permissions at the workflow level.
+# Each job explicitly declares only what it actually needs.
+# This ensures any future jobs added without an explicit permissions block
+# receive no token access rather than the repository default.
+permissions: {}
+
 jobs:
   validate:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read  # required for actions/checkout; nothing else needed
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7  # v7: secure-by-default pull_request_target protections
 
       - name: Set up Python
         uses: actions/setup-python@v5

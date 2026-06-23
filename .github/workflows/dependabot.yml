@@ -1,0 +1,14 @@
+# Dependabot keeps GitHub Actions versions up to date automatically.
+# Weekly PRs are created when new versions of used actions are released.
+# Each update goes through the normal PR review process and CI before merging.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
