@@ -29,8 +29,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   release asset whenever a GitHub release is published
 
 ### Changed
-- Updated `actions/setup-python` from v5 to v6 (Node.js 24 native; clears
-  the remaining deprecation warning in GitHub Actions)
+- Updated `actions/setup-python` from v5 to v6
 
 ## [1.0.0] - 2026-06-23
 
