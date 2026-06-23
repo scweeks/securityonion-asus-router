@@ -9,12 +9,16 @@ the firmware generates.
 
 ## Tested on
 
-| Component | Version |
+| Component | Details |
 |---|---|
 | Security Onion | 3.1 |
 | Elasticsearch | 9.3.3 |
-| Primary router | ASUS ROG Rapture GT-BE98 Pro |
-| Secondary router | ASUS ROG Rapture GT-AXE16000 (AiMesh node) |
+| Hardware | ASUS ROG Rapture GT-BE98 Pro + GT-AXE16000 (AiMesh) |
+
+Should work with any ASUS router running stock firmware that sends syslog over
+UDP 514. The pipeline recognizes daemon names (`kernel`, `hostapd`, `wlceventd`,
+`dnsmasq`, `dropbear`, `roamast`, `bsd`, `avahi-daemon`, `miniupnpd`, `acsd`)
+rather than specific router models, so it is not hardware-specific.
 
 ## Requirements
 
@@ -68,17 +72,19 @@ example IP addresses with your actual router IPs.
 
 **2. Observer identification in `pipelines/asus`** — the observer script maps
 source IP to router name and model. Find this section in the Painless script
-and replace the placeholder IPs with your routers' actual IPs:
+and replace the placeholder IPs, hostnames, and model names with your own:
 
 ```javascript
-if ('192.0.2.1'.equals(ip)) {          // ← replace with your primary router IP
-    ctx.observer.put('name', 'GT-BE98-Pro');
-    ctx.observer.put('product', 'ROG Rapture GT-BE98 Pro');
-} else if ('192.0.2.2'.equals(ip)) {   // ← replace with your secondary router IP
-    ctx.observer.put('name', 'GT-AXE16000');
-    ctx.observer.put('product', 'ROG Rapture GT-AXE16000');
+if ('192.0.2.1'.equals(ip)) {             // ← your primary router IP
+    ctx.observer.put('name', 'my-router-1');           // ← your router hostname
+    ctx.observer.put('product', 'ASUS ROG Rapture XYZ'); // ← your router model
+} else if ('192.0.2.2'.equals(ip)) {      // ← your secondary router IP (remove if only one)
+    ctx.observer.put('name', 'my-router-2');           // ← your router hostname
+    ctx.observer.put('product', 'ASUS ROG Rapture XYZ'); // ← your router model
 }
 ```
+
+Add or remove `else if` blocks to match however many routers you have.
 
 All IP addresses in the pipeline files and test harness use RFC 5737 reserved
 documentation addresses (`192.0.2.x`, `198.51.100.x`) — they are not real

@@ -1,7 +1,42 @@
-# Byte-compiled / optimized / DLL files
+# =============================================================================
+# REAL LOG DATA — never commit real syslog captures to this repository.
+# Log files can contain MAC addresses, hostnames, internal IPs, usernames,
+# and other sensitive information about your network environment.
+# The test harness (tests/run_tests.py) accepts a syslog file as a CLI
+# argument for local bulk validation — that file should stay on your machine.
+# =============================================================================
+syslog
+syslog.txt
+*.syslog
+*.log
+logs/
+captures/
+*.pcap
+*.pcapng
+
+# =============================================================================
+# Python artifacts
+# =============================================================================
 __pycache__/
+*.py[cod]
 *.py[codz]
 *$py.class
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# =============================================================================
+# Environment / editor files
+# =============================================================================
+.env
+.env.*
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
 
 # C extensions
 *.so
