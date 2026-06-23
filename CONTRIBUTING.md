@@ -2,7 +2,7 @@
 
 ## Before you start
 
-Read [DESIGN.md](DESIGN.md). The key design decisions — especially why
+Read [DESIGN.md](DESIGN.md). The key design decisions, especially why
 `ASUSHOST` excludes colons, why we parse from `message` not `real_message`,
 and why `event.dataset` is removed before dispatch — are non-obvious. A
 well-intentioned simplification of these parts will reintroduce fixed bugs.
