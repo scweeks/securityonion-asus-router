@@ -20,18 +20,30 @@ jobs:
 
       - name: Validate JSON syntax — all pipeline files
         run: |
+          echo "## 🔍 JSON Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           FAIL=0
           for f in pipelines/asus pipelines/asus.firewall pipelines/asus.wireless \
                    pipelines/asus.dhcp pipelines/asus.auth pipelines/asus.system; do
             if python3 -m json.tool "$f" > /dev/null 2>&1; then
-              echo "✓  $f"
+              echo "✅  $f" | tee -a /tmp/json_results.txt
             else
-              echo "✗  $f  — INVALID JSON"
-              python3 -m json.tool "$f" || true
+              echo "❌  $f  — INVALID JSON" | tee -a /tmp/json_results.txt
+              python3 -m json.tool "$f" 2>&1 | tee -a /tmp/json_results.txt || true
               FAIL=1
             fi
           done
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/json_results.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
           exit $FAIL
 
       - name: Run synthetic test suite
-        run: python3 tests/run_tests.py
+        run: |
+          set -o pipefail
+          python3 tests/run_tests.py 2>&1 | tee /tmp/test_results.txt
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🧪 Test Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat /tmp/test_results.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
