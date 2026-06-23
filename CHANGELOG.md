@@ -58,3 +58,8 @@ a six-pipeline architecture matching Security Onion's own platform conventions.
 - GitHub Actions workflow validating JSON syntax and running the test suite on
   every push and PR to `main`.
 - `DESIGN.md` documenting the root-cause analysis and key design decisions.
+
+---
+
+[Unreleased]: https://github.com/scweeks/securityonion-asus-router/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/scweeks/securityonion-asus-router/releases/tag/v1.0.0
